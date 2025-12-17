@@ -1,4 +1,5 @@
 
+
 export type Language = 'en' | 'fr' | 'dr';
 
 export type ViewState = 
@@ -13,7 +14,8 @@ export type ViewState =
   | 'settings'
   | 'calendar'
   | 'wallet'
-  | 'trash'; // Added trash view
+  | 'trash'
+  | 'notifications'; // Added notifications view
 
 export interface Task {
   id: string;
@@ -21,6 +23,7 @@ export interface Task {
   completed: boolean;
   isPriority: boolean;
   date: string; // YYYY-MM-DD
+  time?: string; // HH:mm
 }
 
 export interface Challenge {
@@ -63,6 +66,15 @@ export interface Mistake {
   date: string; // ISO Date string
 }
 
+export interface Notification {
+  id: string;
+  title: string;
+  message: string;
+  date: string;
+  read: boolean;
+  type: 'info' | 'success' | 'warning' | 'error';
+}
+
 // Union type for items in trash
 export type TrashItem = 
   | { type: 'task'; data: Task; deletedAt: string }
@@ -85,6 +97,7 @@ export interface AppData {
   loans: Loan[];
   mistakes: Mistake[];
   trash: TrashItem[]; // Added trash array
+  notifications: Notification[];
   dailyGoodThing: string; 
   lastActiveDate: string;
 }
