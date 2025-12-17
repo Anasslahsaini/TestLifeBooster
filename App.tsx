@@ -1,4 +1,5 @@
-import React, { useState, useEffect, useMemo } from 'react';
+
+import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { 
   ArrowRight, Shield, Wallet, Clock, Trophy, 
   AlertCircle, Eye, EyeOff, CheckCircle2, 
@@ -6,9 +7,10 @@ import {
   BarChart3, Calendar as CalendarIcon, ChevronLeft, ChevronRight,
   Home, User, Bell, Search, Camera, X,
   ArrowUpRight, ArrowDownLeft, BadgeMinus, BadgePlus,
-  RefreshCcw, AlertTriangle, Filter, Check, CheckSquare
+  RefreshCcw, AlertTriangle, Filter, Check, CheckSquare, Scan, FileBarChart
 } from 'lucide-react';
-import { AppData, ViewState, Language, TrashItem } from './types';
+import { GoogleGenAI } from "@google/genai";
+import { AppData, ViewState, Language, TrashItem, Notification as AppNotification } from './types';
 import { TEXT, INITIAL_DATA, CURRENCIES } from './constants';
 
 // --- Utility Functions ---
@@ -27,6 +29,18 @@ const isSameDay = (isoDate: string, localDateStr: string) => {
   return local === localDateStr;
 };
 
+// Generate an array of dates around a center date
+const getDaysAround = (centerDateStr: string, daysBefore = 3, daysAfter = 14) => {
+    const dates = [];
+    const center = new Date(centerDateStr);
+    for (let i = -daysBefore; i <= daysAfter; i++) {
+        const d = new Date(center);
+        d.setDate(center.getDate() + i);
+        dates.push(d);
+    }
+    return dates;
+};
+
 // --- UI Components ---
 
 const Card: React.FC<{ children: React.ReactNode; className?: string; onClick?: () => void }> = ({ children, className = "", onClick }) => (
@@ -38,10 +52,10 @@ const Card: React.FC<{ children: React.ReactNode; className?: string; onClick?: 
   </div>
 );
 
-const Button: React.FC<{ onClick?: () => void; variant?: 'primary' | 'secondary' | 'danger' | 'ghost'; children: React.ReactNode; className?: string; fullWidth?: boolean }> = ({ 
-  onClick, variant = 'primary', children, className = "", fullWidth = false 
+const Button: React.FC<{ onClick?: () => void; variant?: 'primary' | 'secondary' | 'danger' | 'ghost'; children: React.ReactNode; className?: string; fullWidth?: boolean; disabled?: boolean }> = ({ 
+  onClick, variant = 'primary', children, className = "", fullWidth = false, disabled = false 
 }) => {
-  const baseStyle = "py-3.5 px-6 rounded-full font-display font-semibold text-sm transition-all duration-300 flex items-center justify-center gap-2 active:scale-95";
+  const baseStyle = "py-3.5 px-6 rounded-full font-display font-semibold text-sm transition-all duration-300 flex items-center justify-center gap-2 active:scale-95 disabled:opacity-50 disabled:pointer-events-none";
   const variants = {
     primary: "bg-primary text-white hover:bg-primaryDark shadow-glow",
     secondary: "bg-[#2A2A2A] text-white hover:bg-[#333333]",
@@ -52,6 +66,7 @@ const Button: React.FC<{ onClick?: () => void; variant?: 'primary' | 'secondary'
   return (
     <button 
       onClick={onClick} 
+      disabled={disabled}
       className={`${baseStyle} ${variants[variant]} ${fullWidth ? 'w-full' : ''} ${className}`}
     >
       {children}
@@ -93,6 +108,16 @@ const SectionHeader: React.FC<{ title: string; subtitle?: string; onBack?: () =>
   </div>
 );
 
+// --- Charts Components ---
+
+const WaveShape = ({ color, opacity = 0.2 }: { color: string, opacity?: number }) => (
+    <div className="absolute bottom-0 left-0 right-0 h-12 overflow-hidden rounded-b-3xl pointer-events-none">
+        <svg viewBox="0 0 1440 320" className="w-full h-full preserve-3d">
+            <path fill={color} fillOpacity={opacity} d="M0,160L48,176C96,192,192,224,288,224C384,224,480,192,576,165.3C672,139,768,117,864,128C960,139,1056,181,1152,197.3C1248,213,1344,203,1392,197.3L1440,192L1440,320L1392,320C1344,320,1248,320,1152,320C1056,320,960,320,864,320C768,320,672,320,576,320C480,320,384,320,288,320C192,320,96,320,48,320L0,320Z"></path>
+        </svg>
+    </div>
+);
+
 // --- App Component ---
 
 const App: React.FC = () => {
@@ -107,6 +132,7 @@ const App: React.FC = () => {
             if (!parsed.gender) parsed.gender = 'male';
             if (!parsed.joinDate) parsed.joinDate = new Date().toISOString(); 
             if (!parsed.trash) parsed.trash = []; 
+            if (!parsed.notifications) parsed.notifications = [];
             return parsed;
         }
     } catch (e) {
@@ -136,13 +162,20 @@ const App: React.FC = () => {
     } else {
       setView('onboarding');
     }
-  }, []); // Only run on mount
+  }, []); 
 
   // Check language from browser
   useEffect(() => {
     const browserLang = navigator.language.toLowerCase();
     if (browserLang.startsWith('fr')) setLang('fr');
     else setLang('en');
+  }, []);
+
+  // Request Notification Permission on mount
+  useEffect(() => {
+    if (Notification && Notification.permission !== 'granted') {
+      Notification.requestPermission();
+    }
   }, []);
 
   // --- Helper Functions ---
@@ -172,11 +205,49 @@ const App: React.FC = () => {
     setData(prev => ({ ...prev, ...updates }));
   };
 
+  const addInAppNotification = (title: string, message: string, type: AppNotification['type'] = 'info') => {
+      const newNotif: AppNotification = {
+          id: Date.now().toString() + Math.random(),
+          title,
+          message,
+          date: new Date().toISOString(),
+          read: false,
+          type
+      };
+      updateData({ notifications: [newNotif, ...data.notifications] });
+  };
+
+  const scheduleNotification = (text: string, time: string) => {
+      if (Notification.permission === 'granted') {
+          const [hours, mins] = time.split(':').map(Number);
+          const now = new Date();
+          const target = new Date();
+          target.setHours(hours, mins, 0, 0);
+          
+          if (target > now) {
+              const diff = target.getTime() - now.getTime();
+              
+              if (diff < 21600000) { 
+                  setTimeout(() => {
+                      new Notification("Life Booster", { body: `It's time for: ${text}` });
+                  }, diff);
+              }
+
+              const diffEarly = diff - (10 * 60 * 1000); 
+              if (diffEarly > 0 && diffEarly < 21600000) {
+                   setTimeout(() => {
+                      new Notification("Life Booster", { body: `Upcoming in 10m: ${text}` });
+                  }, diffEarly);
+              }
+          }
+      }
+      
+      addInAppNotification("Reminder Set", `We'll remind you 10 mins before: "${text}"`, 'info');
+  };
+
   // Trash Logic
   const moveToTrash = (item: any, type: TrashItem['type']) => {
     const trashItem: TrashItem = { type, data: item, deletedAt: new Date().toISOString() };
-    
-    // Remove from specific list
     const updates: Partial<AppData> = { trash: [trashItem, ...data.trash] };
     
     if (type === 'task') updates.tasks = data.tasks.filter(t => t.id !== item.id);
@@ -212,6 +283,12 @@ const App: React.FC = () => {
       });
   };
 
+  const markAllNotificationsRead = () => {
+      updateData({
+          notifications: data.notifications.map(n => ({ ...n, read: true }))
+      });
+  };
+
   // --- Layout Components ---
 
   const BottomNav = () => {
@@ -234,7 +311,6 @@ const App: React.FC = () => {
             <CalendarIcon size={24} strokeWidth={activeTab === 'calendar' ? 2.5 : 2} />
           </button>
 
-          {/* Central Button triggers Quick Menu Modal */}
           <button 
             onClick={() => setShowQuickMenu(true)}
             className="w-14 h-14 rounded-full bg-primary text-white flex items-center justify-center shadow-glow -mt-8 border-[4px] border-[#050505] active:scale-95 transition-transform"
@@ -262,6 +338,7 @@ const App: React.FC = () => {
 
   // --- Views ---
 
+  // ... OnboardingView & NotificationsView remain unchanged ...
   const OnboardingView = () => {
     const [step, setStep] = useState(0);
 
@@ -285,11 +362,11 @@ const App: React.FC = () => {
             joinDate: new Date().toISOString()
         };
         setData(newData);
-        // Force save to localStorage immediately to prevent race conditions
         try {
             localStorage.setItem('lifebooster_data', JSON.stringify(newData));
         } catch(e) { console.error("Save failed", e); }
         setView('dashboard');
+        addInAppNotification("Welcome to Life Booster!", "Your private journey starts now.", 'success');
     }
 
     return (
@@ -323,37 +400,83 @@ const App: React.FC = () => {
     );
   };
 
+  const NotificationsView = () => {
+      const unreadCount = data.notifications.filter(n => !n.read).length;
+
+      return (
+          <div className="h-full flex flex-col pt-4 pb-24">
+               <SectionHeader 
+                  title={t('notifications_title')} 
+                  onBack={() => setView('dashboard')} 
+                  rightElement={
+                      unreadCount > 0 && (
+                          <button onClick={markAllNotificationsRead} className="text-xs text-primary font-bold">
+                              {t('notifications_mark_read')}
+                          </button>
+                      )
+                  }
+               />
+               
+               <div className="flex-1 overflow-y-auto space-y-3 no-scrollbar">
+                   {data.notifications.length === 0 && (
+                       <div className="text-center text-text-muted mt-20 opacity-30">
+                           <Bell size={48} className="mx-auto mb-4" />
+                           <p className="text-sm">{t('notifications_empty')}</p>
+                       </div>
+                   )}
+
+                   {data.notifications.map(notif => (
+                       <div key={notif.id} className={`p-4 rounded-3xl border flex gap-3 ${notif.read ? 'bg-[#161616] border-white/5 opacity-70' : 'bg-[#1C1C1C] border-white/10'}`}>
+                           <div className={`w-2 h-2 rounded-full mt-2 shrink-0 ${notif.read ? 'bg-transparent' : 'bg-primary'}`}></div>
+                           <div className="flex-1">
+                               <div className="flex justify-between items-start">
+                                    <h4 className="font-bold text-sm text-white mb-1">{notif.title}</h4>
+                                    <span className="text-[10px] text-text-muted">{new Date(notif.date).toLocaleDateString()}</span>
+                               </div>
+                               <p className="text-xs text-text-muted leading-relaxed">{notif.message}</p>
+                           </div>
+                       </div>
+                   ))}
+               </div>
+          </div>
+      );
+  };
+
   const DashboardView = () => {
-    // Tasks use 'YYYY-MM-DD' so direct comparison is fine
+    // Generate dates for the scrollable pill selector
+    const scrollableDates = useMemo(() => getDaysAround(selectedDate, 3, 7), [selectedDate]);
+
     const currentTasks = data.tasks.filter(t => t.date === selectedDate);
     const tasksDone = currentTasks.filter(t => t.completed).length;
     const tasksTotal = currentTasks.length;
     const tasksProgress = tasksTotal > 0 ? (tasksDone / tasksTotal) * 100 : 0;
 
-    // Financial Calculation for Dashboard - SHOW EVERYTHING (TOTAL BALANCE)
     const totalIncome = data.incomes.reduce((acc, curr) => acc + curr.amount, 0);
     const totalExpenses = data.expenses.reduce((acc, curr) => acc + curr.amount, 0);
     const totalBalance = totalIncome - totalExpenses;
 
     const mistakesCount = data.mistakes.filter(m => isSameDay(m.date, selectedDate)).length;
+    const unreadNotifications = data.notifications.filter(n => !n.read).length;
 
     return (
       <div className="pb-32 animate-in fade-in duration-500">
-        {/* Header */}
-        <div className="flex justify-between items-start mb-8 pt-4">
+        <div className="flex justify-between items-start mb-6 pt-4">
           <div>
             <h1 className="text-2xl font-display font-bold">{t('hi')}, {data.name} 👋</h1>
             <p className="text-text-muted text-xs mt-1">{t('dashboard_subtitle')}</p>
           </div>
           <div className="flex gap-3">
              <IconButton icon={privateMode ? <EyeOff size={20} /> : <Eye size={20} />} onClick={() => setPrivateMode(!privateMode)} />
-             <IconButton icon={<Bell size={20} />} className="relative" />
-             <div className="absolute top-5 right-5 w-2.5 h-2.5 bg-primary rounded-full border-2 border-[#050505]"></div>
+             <div className="relative">
+                 <IconButton icon={<Bell size={20} />} onClick={() => setView('notifications')} />
+                 {unreadNotifications > 0 && (
+                     <div className="absolute top-0 right-0 w-3 h-3 bg-mistake rounded-full border-2 border-[#050505] flex items-center justify-center"></div>
+                 )}
+             </div>
           </div>
         </div>
 
-        {/* Hero Card - Daily Status */}
-        <div className="bg-gradient-to-br from-[#161616] to-[#0A0A0A] rounded-[32px] p-6 mb-8 border border-white/10 relative overflow-hidden shadow-2xl">
+        <div className="bg-gradient-to-br from-[#161616] to-[#0A0A0A] rounded-[32px] p-6 mb-6 border border-white/10 relative overflow-hidden shadow-2xl">
              <div className="absolute top-0 right-0 w-32 h-32 bg-primary/10 blur-[50px] rounded-full -mr-10 -mt-10"></div>
              
              <div className="flex items-center gap-4 mb-6">
@@ -376,7 +499,6 @@ const App: React.FC = () => {
 
              <div className="space-y-2 mb-6">
                 <div className="flex justify-between text-sm">
-                    {/* Updated to show Wallet Balance (Solde Net) instead of Daily Spent */}
                     <span className="text-text-muted">{t('money_balance')}:</span>
                     <span className="font-bold text-white">{formatCurrency(totalBalance)}</span>
                 </div>
@@ -391,75 +513,54 @@ const App: React.FC = () => {
                 <Button variant="secondary" onClick={() => setView('daily_summary')}>{t('summary_title')}</Button>
              </div>
         </div>
+        
+        {/* Horizontal Date Picker */}
+        <div className="flex gap-2 overflow-x-auto pb-4 mb-2 no-scrollbar px-1">
+            {scrollableDates.map((d, idx) => {
+                const dateStr = getISODate(d);
+                const isSelected = dateStr === selectedDate;
+                return (
+                    <button 
+                        key={idx}
+                        onClick={() => setSelectedDate(dateStr)}
+                        className={`min-w-[56px] h-[72px] rounded-[24px] flex flex-col items-center justify-center gap-1 transition-all duration-300 border ${isSelected ? 'bg-white text-black border-white shadow-glow' : 'bg-[#161616] text-text-muted border-white/5 hover:bg-[#202020]'}`}
+                    >
+                        <span className={`text-[10px] font-medium ${isSelected ? 'opacity-80' : 'opacity-60'}`}>
+                            {d.toLocaleDateString((lang === 'fr' || lang === 'dr') ? 'fr-FR' : 'en-US', { weekday: 'short' })}
+                        </span>
+                        <span className="text-lg font-bold">
+                            {d.getDate()}
+                        </span>
+                        {/* Changed div to span to fix hydration nesting error (div inside button) */}
+                        {isSelected && <span className="w-1 h-1 rounded-full bg-black mt-1"></span>}
+                        {!isSelected && data.tasks.some(t => t.date === dateStr) && <span className="w-1 h-1 rounded-full bg-white/30 mt-1"></span>}
+                    </button>
+                )
+            })}
+        </div>
 
-        {/* Sections Grid */}
         <h3 className="text-lg font-bold mb-4">{t('quick_overview')}</h3>
         <div className="grid grid-cols-2 gap-3">
-            <div 
-                onClick={() => setView('time_manager')}
-                className="bg-[#161616] p-5 rounded-3xl border border-white/5 cursor-pointer active:scale-95 transition-all hover:bg-[#1C1C1C] flex flex-col justify-between h-36"
-            >
-                <div className="w-10 h-10 rounded-full bg-blue-500/10 flex items-center justify-center text-blue-500 mb-3">
-                    <Clock size={20} />
-                </div>
-                <div>
-                     <h4 className="font-bold text-sm text-white mb-1">{t('section_tasks')}</h4>
-                     <p className="text-xs text-text-muted">{tasksTotal - tasksDone} {t('pending')}</p>
-                </div>
+            <div onClick={() => setView('time_manager')} className="bg-[#161616] p-5 rounded-3xl border border-white/5 cursor-pointer active:scale-95 transition-all hover:bg-[#1C1C1C] flex flex-col justify-between h-36">
+                <div className="w-10 h-10 rounded-full bg-blue-500/10 flex items-center justify-center text-blue-500 mb-3"><Clock size={20} /></div>
+                <div><h4 className="font-bold text-sm text-white mb-1">{t('section_tasks')}</h4><p className="text-xs text-text-muted">{tasksTotal - tasksDone} {t('pending')}</p></div>
             </div>
-
-            <div 
-                onClick={() => { setActiveTab('wallet'); setView('wallet'); }}
-                className="bg-[#161616] p-5 rounded-3xl border border-white/5 cursor-pointer active:scale-95 transition-all hover:bg-[#1C1C1C] flex flex-col justify-between h-36"
-            >
-                <div className="w-10 h-10 rounded-full bg-primary/10 flex items-center justify-center text-primary mb-3">
-                    <Wallet size={20} />
-                </div>
-                <div>
-                     {/* Updated to show Wallet Balance instead of Daily Expenses */}
-                     <h4 className="font-bold text-sm text-white mb-1">{t('section_wallet')}</h4>
-                     <p className="text-xs text-text-muted">{formatCurrency(totalBalance)}</p>
-                </div>
+            <div onClick={() => { setActiveTab('wallet'); setView('wallet'); }} className="bg-[#161616] p-5 rounded-3xl border border-white/5 cursor-pointer active:scale-95 transition-all hover:bg-[#1C1C1C] flex flex-col justify-between h-36">
+                <div className="w-10 h-10 rounded-full bg-primary/10 flex items-center justify-center text-primary mb-3"><Wallet size={20} /></div>
+                <div><h4 className="font-bold text-sm text-white mb-1">{t('section_wallet')}</h4><p className="text-xs text-text-muted">{formatCurrency(totalBalance)}</p></div>
             </div>
-
-            <div 
-                onClick={() => setView('personal_challenges')}
-                className="bg-[#161616] p-5 rounded-3xl border border-white/5 cursor-pointer active:scale-95 transition-all hover:bg-[#1C1C1C] flex flex-col justify-between h-36"
-            >
-                <div className="w-10 h-10 rounded-full bg-yellow-500/10 flex items-center justify-center text-yellow-500 mb-3">
-                    <Trophy size={20} />
-                </div>
-                <div>
-                     <h4 className="font-bold text-sm text-white mb-1">{t('section_challenges')}</h4>
-                     <p className="text-xs text-text-muted">{t('push_yourself')}</p>
-                </div>
+            <div onClick={() => setView('personal_challenges')} className="bg-[#161616] p-5 rounded-3xl border border-white/5 cursor-pointer active:scale-95 transition-all hover:bg-[#1C1C1C] flex flex-col justify-between h-36">
+                <div className="w-10 h-10 rounded-full bg-yellow-500/10 flex items-center justify-center text-yellow-500 mb-3"><Trophy size={20} /></div>
+                <div><h4 className="font-bold text-sm text-white mb-1">{t('section_challenges')}</h4><p className="text-xs text-text-muted">{t('push_yourself')}</p></div>
             </div>
-
-             <div 
-                onClick={() => setView('daily_mistakes')}
-                className="bg-[#161616] p-5 rounded-3xl border border-white/5 cursor-pointer active:scale-95 transition-all hover:bg-[#1C1C1C] flex flex-col justify-between h-36"
-            >
-                <div className="w-10 h-10 rounded-full bg-mistake/10 flex items-center justify-center text-mistake mb-3">
-                    <AlertCircle size={20} />
-                </div>
-                <div>
-                     <h4 className="font-bold text-sm text-white mb-1">{t('section_mistakes')}</h4>
-                     <p className="text-xs text-text-muted">{mistakesCount} {t('logged')}</p>
-                </div>
+             <div onClick={() => setView('daily_mistakes')} className="bg-[#161616] p-5 rounded-3xl border border-white/5 cursor-pointer active:scale-95 transition-all hover:bg-[#1C1C1C] flex flex-col justify-between h-36">
+                <div className="w-10 h-10 rounded-full bg-mistake/10 flex items-center justify-center text-mistake mb-3"><AlertCircle size={20} /></div>
+                <div><h4 className="font-bold text-sm text-white mb-1">{t('section_mistakes')}</h4><p className="text-xs text-text-muted">{mistakesCount} {t('logged')}</p></div>
             </div>
-
-            <div 
-                onClick={() => setView('loans')}
-                className="col-span-2 bg-[#161616] p-4 rounded-3xl border border-white/5 cursor-pointer active:scale-95 transition-all hover:bg-[#1C1C1C] flex items-center justify-between"
-            >
+            <div onClick={() => setView('loans')} className="col-span-2 bg-[#161616] p-4 rounded-3xl border border-white/5 cursor-pointer active:scale-95 transition-all hover:bg-[#1C1C1C] flex items-center justify-between">
                  <div className="flex items-center gap-4">
-                    <div className="w-10 h-10 rounded-full bg-purple-500/10 flex items-center justify-center text-purple-500">
-                        <MoreHorizontal size={20} />
-                    </div>
-                    <div>
-                        <h4 className="font-bold text-sm text-white">{t('section_loans')}</h4>
-                        <p className="text-xs text-text-muted">{t('track_debts')}</p>
-                    </div>
+                    <div className="w-10 h-10 rounded-full bg-purple-500/10 flex items-center justify-center text-purple-500"><MoreHorizontal size={20} /></div>
+                    <div><h4 className="font-bold text-sm text-white">{t('section_loans')}</h4><p className="text-xs text-text-muted">{t('track_debts')}</p></div>
                 </div>
                 <ChevronRight size={20} className="text-text-muted" />
             </div>
@@ -468,21 +569,152 @@ const App: React.FC = () => {
     );
   };
 
+  const ReportView = () => {
+      // Logic for reports
+      const totalCompleted = data.tasks.filter(t => t.completed).length;
+      const totalOngoing = data.tasks.filter(t => !t.completed).length;
+
+      // Last 7 days data for charts
+      const last7Days = useMemo(() => {
+          const arr = [];
+          for (let i = 6; i >= 0; i--) {
+              const d = new Date();
+              d.setDate(d.getDate() - i);
+              const dateStr = getISODate(d);
+              
+              const dayTasks = data.tasks.filter(t => t.date === dateStr);
+              const completed = dayTasks.filter(t => t.completed).length;
+              const ongoing = dayTasks.length - completed;
+              const dayName = d.toLocaleDateString('en-US', { weekday: 'short' });
+
+              arr.push({ day: dayName, completed, ongoing, date: dateStr });
+          }
+          return arr;
+      }, [data.tasks]);
+
+      return (
+        <div className="h-full flex flex-col pt-4 pb-24 animate-in fade-in slide-in-from-right-10 duration-500">
+             <SectionHeader title="Report" onBack={() => setView('dashboard')} rightElement={<CalendarIcon size={20} className="text-text-muted"/>} />
+
+             <h3 className="font-bold text-lg mb-4">Task Overview</h3>
+             <div className="grid grid-cols-2 gap-4 mb-8">
+                 <div className="bg-gradient-to-br from-[#8E8B98] to-[#5D4E6D] rounded-3xl p-5 relative overflow-hidden h-36 flex flex-col justify-between shadow-lg">
+                      <div className="relative z-10">
+                          <h4 className="text-4xl font-bold text-white mb-1">{totalCompleted}</h4>
+                          <p className="text-xs text-white/80 font-medium">Completed Task</p>
+                      </div>
+                      <WaveShape color="#FFFFFF" opacity={0.15} />
+                 </div>
+                 <div className="bg-gradient-to-br from-[#ECA376] to-[#D97D54] rounded-3xl p-5 relative overflow-hidden h-36 flex flex-col justify-between shadow-lg">
+                      <div className="relative z-10">
+                          <h4 className="text-4xl font-bold text-white mb-1">{totalOngoing}</h4>
+                          <p className="text-xs text-white/80 font-medium">Ongoing Task</p>
+                      </div>
+                      <WaveShape color="#FFFFFF" opacity={0.15} />
+                 </div>
+             </div>
+
+             <div className="bg-[#1C1C1E] p-6 rounded-3xl border border-white/5 mb-6">
+                 <div className="flex justify-between items-center mb-6">
+                     <h3 className="font-bold text-sm">Daily tasks overview</h3>
+                     <span className="text-[10px] text-text-muted">{getISODate(new Date())}</span>
+                 </div>
+                 
+                 {/* CSS Bar Chart */}
+                 <div className="flex items-end justify-between h-32 gap-2">
+                     {last7Days.map((d, i) => {
+                         const maxH = 100; // max height pixels roughly
+                         // Determine max value for scaling (simple scaling)
+                         const maxVal = Math.max(...last7Days.map(x => x.completed + x.ongoing), 5);
+                         
+                         const hCompleted = (d.completed / maxVal) * 100;
+                         const hOngoing = (d.ongoing / maxVal) * 100;
+
+                         return (
+                             <div key={i} className="flex flex-col items-center gap-2 flex-1">
+                                 <div className="w-full flex gap-1 items-end justify-center h-full">
+                                      {/* Completed Bar */}
+                                     <div 
+                                        className="w-1.5 bg-[#8E8B98] rounded-t-full transition-all duration-500"
+                                        style={{ height: `${Math.max(hCompleted, 5)}%` }}
+                                     ></div>
+                                     {/* Ongoing Bar */}
+                                     <div 
+                                        className="w-1.5 bg-[#ECA376] rounded-t-full transition-all duration-500"
+                                        style={{ height: `${Math.max(hOngoing, 5)}%` }}
+                                     ></div>
+                                 </div>
+                                 <span className="text-[10px] text-text-muted">{d.day}</span>
+                             </div>
+                         )
+                     })}
+                 </div>
+                 <div className="flex justify-center gap-4 mt-4">
+                     <div className="flex items-center gap-1.5">
+                         <div className="w-2 h-2 rounded-full bg-[#8E8B98]"></div>
+                         <span className="text-[10px] text-text-muted">Complet</span>
+                     </div>
+                     <div className="flex items-center gap-1.5">
+                         <div className="w-2 h-2 rounded-full bg-[#ECA376]"></div>
+                         <span className="text-[10px] text-text-muted">Ongoing</span>
+                     </div>
+                 </div>
+             </div>
+
+             <div className="bg-[#1C1C1E] p-6 rounded-3xl border border-white/5">
+                 <div className="flex justify-between items-center mb-2">
+                     <div className="flex flex-col">
+                        <h3 className="font-bold text-sm">Project overview</h3>
+                        <span className="text-[10px] text-text-muted">Avg activity: {Math.round(totalCompleted/7)} tasks/day</span>
+                     </div>
+                     <span className="text-[10px] text-text-muted flex items-center gap-1">Weekly <ChevronLeft size={10} className="-rotate-90"/></span>
+                 </div>
+                 
+                 {/* Simple SVG Line Chart */}
+                 <div className="h-32 w-full relative pt-4">
+                      <svg viewBox="0 0 100 50" className="w-full h-full overflow-visible" preserveAspectRatio="none">
+                          <defs>
+                              <linearGradient id="lineGradient" x1="0" y1="0" x2="0" y2="1">
+                                  <stop offset="0%" stopColor="#ECA376" stopOpacity="0.3"/>
+                                  <stop offset="100%" stopColor="#ECA376" stopOpacity="0"/>
+                              </linearGradient>
+                          </defs>
+                          {/* Generate path based on completed tasks */}
+                          {(() => {
+                              const points = last7Days.map((d, i) => {
+                                  const x = (i / (last7Days.length - 1)) * 100;
+                                  const maxVal = Math.max(...last7Days.map(x => x.completed), 1);
+                                  const y = 50 - ((d.completed / maxVal) * 40); // 50 is height
+                                  return `${x},${y}`;
+                              }).join(" ");
+                              
+                              return (
+                                  <>
+                                    <path d={`M0,50 ${points} 100,50`} fill="url(#lineGradient)" />
+                                    <polyline points={points} fill="none" stroke="#ECA376" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+                                  </>
+                              )
+                          })()}
+                      </svg>
+                      {/* X Axis Labels */}
+                      <div className="flex justify-between mt-2 px-1">
+                          {last7Days.map((d, i) => (
+                              <span key={i} className="text-[8px] text-text-muted">{d.day}</span>
+                          ))}
+                      </div>
+                 </div>
+             </div>
+        </div>
+      );
+  };
+  
   const SettingsView = () => {
       const [localName, setLocalName] = useState(data.name);
-
-      const handleSave = () => {
-          updateData({ name: localName });
-          setActiveTab('home');
-          setView('dashboard');
-      };
-
-      const handleReset = () => {
-          if (window.confirm(t('reset_confirm_msg'))) {
-              localStorage.clear();
-              window.location.reload();
-          }
-      };
+      const handleSave = () => { updateData({ name: localName }); setActiveTab('home'); setView('dashboard'); };
+      const handleReset = () => { if (window.confirm(t('reset_confirm_msg'))) { localStorage.clear(); window.location.reload(); } };
+      
+      // Use stable ID based on name length to avoid hydration mismatches with random()
+      const stableId = useMemo(() => Math.floor(data.name.length * 1234 + 1000), [data.name]);
 
       return (
           <div className="h-full flex flex-col pt-8 pb-20 overflow-y-auto no-scrollbar">
@@ -490,165 +722,66 @@ const App: React.FC = () => {
                   <h2 className="text-2xl font-bold font-display">{t('settings_title')}</h2>
                   <div className="w-10"></div> 
                </div>
-               
                <div className="flex flex-col items-center mb-10">
                    <div className="w-28 h-28 rounded-full bg-[#161616] p-1.5 border border-white/5 shadow-2xl mb-4">
-                       <div className="w-full h-full rounded-full bg-[#2A2A2A] flex items-center justify-center overflow-hidden relative shadow-inner">
-                            <span className="text-4xl font-display font-bold text-white">
-                                {data.name ? data.name.charAt(0).toUpperCase() : "U"}
-                            </span>
-                       </div>
+                       <div className="w-full h-full rounded-full bg-[#2A2A2A] flex items-center justify-center overflow-hidden relative shadow-inner"><span className="text-4xl font-display font-bold text-white">{data.name ? data.name.charAt(0).toUpperCase() : "U"}</span></div>
                    </div>
                    <h3 className="text-xl font-bold">{data.name}</h3>
-                   <p className="text-xs text-text-muted uppercase tracking-widest mt-1">ID: LIFE-{Math.floor(Math.random() * 9000) + 1000}</p>
+                   {/* Replaced Math.random() with stableId to prevent hydration error */}
+                   <p className="text-xs text-text-muted uppercase tracking-widest mt-1">ID: LIFE-{stableId}</p>
                </div>
-
                <div className="px-4 space-y-6">
                    <Input label="Display Name" value={localName} onChange={(e) => setLocalName(e.target.value)} />
-                   
-                   {/* Link to Trash */}
-                   <button 
-                       onClick={() => setView('trash')}
-                       className="w-full p-4 rounded-2xl bg-input text-left flex items-center justify-between group active:scale-95 transition-all"
-                   >
-                       <div className="flex items-center gap-3">
-                           <div className="w-10 h-10 rounded-full bg-[#161616] flex items-center justify-center text-text-muted group-hover:text-mistake transition-colors">
-                               <Trash2 size={20} />
-                           </div>
-                           <span className="font-medium text-sm">{t('trash_title')}</span>
-                       </div>
-                       <div className="flex items-center gap-2 text-text-muted text-xs">
-                            {data.trash.length > 0 && <span className="bg-mistake/20 text-mistake px-2 py-0.5 rounded-full">{data.trash.length}</span>}
-                            <ChevronRight size={16} />
-                       </div>
-                   </button>
-
+                   {/* Replaced button with div role="button" to allow inner divs (fixing invalid HTML nesting) */}
+                   <div role="button" onClick={() => setView('trash')} className="w-full p-4 rounded-2xl bg-input text-left flex items-center justify-between group active:scale-95 transition-all cursor-pointer">
+                       <div className="flex items-center gap-3"><div className="w-10 h-10 rounded-full bg-[#161616] flex items-center justify-center text-text-muted group-hover:text-mistake transition-colors"><Trash2 size={20} /></div><span className="font-medium text-sm">{t('trash_title')}</span></div>
+                       <div className="flex items-center gap-2 text-text-muted text-xs">{data.trash.length > 0 && <span className="bg-mistake/20 text-mistake px-2 py-0.5 rounded-full">{data.trash.length}</span>}<ChevronRight size={16} /></div>
+                   </div>
                    <div>
                        <label className="block text-text-muted text-xs font-medium mb-2 ml-1">{t('settings_gender')}</label>
                        <div className="grid grid-cols-2 gap-3 p-1 bg-input rounded-2xl">
-                            <button 
-                                onClick={() => updateData({ gender: 'male' })}
-                                className={`py-3 px-4 rounded-xl text-sm font-semibold transition-all ${data.gender === 'male' ? 'bg-[#333] text-white shadow-md' : 'text-text-muted hover:text-white'}`}
-                            >
-                                {t('settings_male')}
-                            </button>
-                            <button 
-                                onClick={() => updateData({ gender: 'female' })}
-                                className={`py-3 px-4 rounded-xl text-sm font-semibold transition-all ${data.gender === 'female' ? 'bg-[#333] text-white shadow-md' : 'text-text-muted hover:text-white'}`}
-                            >
-                                {t('settings_female')}
-                            </button>
+                            <button onClick={() => updateData({ gender: 'male' })} className={`py-3 px-4 rounded-xl text-sm font-semibold transition-all ${data.gender === 'male' ? 'bg-[#333] text-white shadow-md' : 'text-text-muted hover:text-white'}`}>{t('settings_male')}</button>
+                            <button onClick={() => updateData({ gender: 'female' })} className={`py-3 px-4 rounded-xl text-sm font-semibold transition-all ${data.gender === 'female' ? 'bg-[#333] text-white shadow-md' : 'text-text-muted hover:text-white'}`}>{t('settings_female')}</button>
                        </div>
                    </div>
-
                    <div>
                        <label className="block text-text-muted text-xs font-medium mb-2 ml-1">{t('settings_currency')}</label>
                        <div className="relative">
-                           <select 
-                               value={data.currency} 
-                               onChange={(e) => updateData({ currency: e.target.value })}
-                               className="w-full appearance-none bg-input border border-transparent rounded-2xl p-4 text-white focus:outline-none focus:border-primary/50 text-sm"
-                           >
-                               {CURRENCIES.map(c => (
-                                   <option key={c.code} value={c.code}>
-                                       {c.code} - {c.name}
-                                   </option>
-                               ))}
-                           </select>
+                           <select value={data.currency} onChange={(e) => updateData({ currency: e.target.value })} className="w-full appearance-none bg-input border border-transparent rounded-2xl p-4 text-white focus:outline-none focus:border-primary/50 text-sm">{CURRENCIES.map(c => (<option key={c.code} value={c.code}>{c.code} - {c.name}</option>))}</select>
                            <ChevronRight className={`absolute right-4 top-1/2 -translate-y-1/2 rotate-90 text-text-muted`} size={16} />
                        </div>
                    </div>
-
                    <div>
                        <label className="block text-text-muted text-xs font-medium mb-2 ml-1">{t('settings_language')}</label>
                        <div className="grid grid-cols-3 gap-3">
-                           <button 
-                             onClick={() => setLang('en')} 
-                             className={`p-4 rounded-2xl text-sm font-medium transition-all ${lang === 'en' ? 'bg-primary text-white' : 'bg-input text-text-muted'}`}
-                           >
-                             English
-                           </button>
-                           <button 
-                             onClick={() => setLang('fr')} 
-                             className={`p-4 rounded-2xl text-sm font-medium transition-all ${lang === 'fr' ? 'bg-primary text-white' : 'bg-input text-text-muted'}`}
-                           >
-                             Français
-                           </button>
-                           <button 
-                             onClick={() => setLang('dr')} 
-                             className={`p-4 rounded-2xl text-sm font-medium transition-all ${lang === 'dr' ? 'bg-primary text-white' : 'bg-input text-text-muted'}`}
-                           >
-                             Darija
-                           </button>
+                           <button onClick={() => setLang('en')} className={`p-4 rounded-2xl text-sm font-medium transition-all ${lang === 'en' ? 'bg-primary text-white' : 'bg-input text-text-muted'}`}>English</button>
+                           <button onClick={() => setLang('fr')} className={`p-4 rounded-2xl text-sm font-medium transition-all ${lang === 'fr' ? 'bg-primary text-white' : 'bg-input text-text-muted'}`}>Français</button>
+                           <button onClick={() => setLang('dr')} className={`p-4 rounded-2xl text-sm font-medium transition-all ${lang === 'dr' ? 'bg-primary text-white' : 'bg-input text-text-muted'}`}>Darija</button>
                        </div>
                    </div>
-
-                   <div className="pt-4">
-                        <Button fullWidth onClick={handleSave}>Save Changes</Button>
-                   </div>
-                   
-                   <div className="pt-4">
-                        <Button variant="danger" fullWidth onClick={handleReset}>{t('settings_reset')}</Button>
-                   </div>
+                   <div className="pt-4"><Button fullWidth onClick={handleSave}>Save Changes</Button></div>
+                   <div className="pt-4"><Button variant="danger" fullWidth onClick={handleReset}>{t('settings_reset')}</Button></div>
                </div>
           </div>
       )
-  }
-
+  };
+  
   const TrashView = () => {
     return (
         <div className="h-full flex flex-col pt-4 pb-24">
             <SectionHeader title={t('trash_title')} onBack={() => setView('settings')} />
-            
-            {data.trash.length > 0 && (
-                <div className="mb-4 px-1">
-                    <p className="text-xs text-text-muted flex items-center gap-2">
-                        <AlertTriangle size={12} />
-                        {t('trash_warning')}
-                    </p>
-                </div>
-            )}
-
+            {data.trash.length > 0 && (<div className="mb-4 px-1"><p className="text-xs text-text-muted flex items-center gap-2"><AlertTriangle size={12} />{t('trash_warning')}</p></div>)}
             <div className="flex-1 overflow-y-auto space-y-3 no-scrollbar">
-                {data.trash.length === 0 && (
-                     <div className="text-center text-text-muted mt-20 opacity-30">
-                        <Trash2 size={48} className="mx-auto mb-4" />
-                        <p className="text-sm">{t('trash_empty')}</p>
-                    </div>
-                )}
-                
+                {data.trash.length === 0 && (<div className="text-center text-text-muted mt-20 opacity-30"><Trash2 size={48} className="mx-auto mb-4" /><p className="text-sm">{t('trash_empty')}</p></div>)}
                 {data.trash.map((item, idx) => {
                     const text = (item.data as any).text || (item.data as any).description || (item.data as any).person;
                     const amount = (item.data as any).amount;
-                    
                     return (
                         <div key={idx} className="bg-[#161616] p-4 rounded-3xl border border-white/5 flex flex-col gap-3">
                             <div className="flex justify-between items-start">
-                                <div>
-                                    <div className="flex items-center gap-2 mb-1">
-                                        <span className="text-[10px] uppercase bg-white/10 px-2 rounded text-text-muted font-bold">{item.type}</span>
-                                        <span className="text-xs text-text-muted">{new Date(item.deletedAt).toLocaleDateString()}</span>
-                                    </div>
-                                    <p className="font-bold text-sm line-clamp-1">{text}</p>
-                                    {amount && <p className="text-xs font-mono">{formatCurrency(amount)}</p>}
-                                </div>
+                                <div><div className="flex items-center gap-2 mb-1"><span className="text-[10px] uppercase bg-white/10 px-2 rounded text-text-muted font-bold">{item.type}</span><span className="text-xs text-text-muted">{new Date(item.deletedAt).toLocaleDateString()}</span></div><p className="font-bold text-sm line-clamp-1">{text}</p>{amount && <p className="text-xs font-mono">{formatCurrency(amount)}</p>}</div>
                             </div>
-                            <div className="flex gap-2 mt-1">
-                                <button 
-                                    onClick={() => restoreFromTrash(item)}
-                                    className="flex-1 bg-primary/10 text-primary py-2 rounded-xl text-xs font-bold flex items-center justify-center gap-2 hover:bg-primary/20"
-                                >
-                                    <RefreshCcw size={14} />
-                                    {t('trash_restore')}
-                                </button>
-                                <button 
-                                    onClick={() => deletePermanently((item.data as any).id)}
-                                    className="flex-1 bg-mistake/10 text-mistake py-2 rounded-xl text-xs font-bold flex items-center justify-center gap-2 hover:bg-mistake/20"
-                                >
-                                    <Trash2 size={14} />
-                                    {t('trash_delete')}
-                                </button>
-                            </div>
+                            <div className="flex gap-2 mt-1"><button onClick={() => restoreFromTrash(item)} className="flex-1 bg-primary/10 text-primary py-2 rounded-xl text-xs font-bold flex items-center justify-center gap-2 hover:bg-primary/20"><RefreshCcw size={14} />{t('trash_restore')}</button><button onClick={() => deletePermanently((item.data as any).id)} className="flex-1 bg-mistake/10 text-mistake py-2 rounded-xl text-xs font-bold flex items-center justify-center gap-2 hover:bg-mistake/20"><Trash2 size={14} />{t('trash_delete')}</button></div>
                         </div>
                     );
                 })}
@@ -658,58 +791,21 @@ const App: React.FC = () => {
   };
 
   const LoansView = () => {
-    // Calculate total lent (excluding paid)
     const totalLent = data.loans.filter(l => l.type === 'lent' && !l.isPaid).reduce((acc, curr) => acc + curr.amount, 0);
     const totalBorrowed = data.loans.filter(l => l.type === 'borrowed' && !l.isPaid).reduce((acc, curr) => acc + curr.amount, 0);
-
     return (
       <div className="h-full flex flex-col pt-4 pb-24">
         <SectionHeader title={t('section_loans')} onBack={() => setView('dashboard')} />
         <div className="grid grid-cols-2 gap-4 mb-6">
-          <div className="bg-[#161616] p-4 rounded-3xl border border-white/5">
-            <p className="text-xs text-text-muted mb-1">{t('loans_lent')}</p>
-            <p className="text-xl font-bold text-green-500">{formatCurrency(totalLent)}</p>
-          </div>
-          <div className="bg-[#161616] p-4 rounded-3xl border border-white/5">
-            <p className="text-xs text-text-muted mb-1">{t('loans_borrowed')}</p>
-            <p className="text-xl font-bold text-red-500">{formatCurrency(totalBorrowed)}</p>
-          </div>
+          <div className="bg-[#161616] p-4 rounded-3xl border border-white/5"><p className="text-xs text-text-muted mb-1">{t('loans_lent')}</p><p className="text-xl font-bold text-green-500">{formatCurrency(totalLent)}</p></div>
+          <div className="bg-[#161616] p-4 rounded-3xl border border-white/5"><p className="text-xs text-text-muted mb-1">{t('loans_borrowed')}</p><p className="text-xl font-bold text-red-500">{formatCurrency(totalBorrowed)}</p></div>
         </div>
         <div className="flex-1 overflow-y-auto space-y-3 no-scrollbar">
             {data.loans.length === 0 && <p className="text-text-muted text-center text-sm">No records yet</p>}
             {data.loans.map(loan => (
                 <div key={loan.id} className={`flex justify-between items-center p-4 rounded-3xl bg-[#161616] border ${loan.isPaid ? 'border-transparent opacity-50' : 'border-white/5'}`}>
-                    <div>
-                        <p className={`font-bold ${loan.isPaid ? 'line-through text-text-muted' : ''}`}>{loan.person}</p>
-                        <p className={`text-xs ${loan.type === 'lent' ? 'text-green-500' : 'text-red-500'}`}>
-                            {loan.isPaid ? t('loan_paid') : (loan.type === 'lent' ? 'Owes you' : 'You owe')}
-                        </p>
-                        {/* Show Due Date if exists */}
-                        {loan.dueDate && !loan.isPaid && (
-                            <p className="text-[10px] text-text-muted flex items-center gap-1 mt-0.5">
-                                <Clock size={10} />
-                                {new Date(loan.dueDate).toLocaleDateString()}
-                            </p>
-                        )}
-                    </div>
-                    <div className="flex items-center gap-2">
-                         <span className="font-mono font-bold mr-2">{formatCurrency(loan.amount)}</span>
-                         
-                         {/* Toggle Paid Status Button */}
-                         <button 
-                            onClick={() => toggleLoanStatus(loan.id)}
-                            className={`w-8 h-8 rounded-full flex items-center justify-center transition-all ${loan.isPaid ? 'bg-primary text-white' : 'bg-white/10 text-text-muted hover:text-white'}`}
-                         >
-                             <Check size={16} />
-                         </button>
-
-                         <button 
-                            onClick={() => moveToTrash(loan, 'loan')}
-                            className="text-text-muted hover:text-mistake p-1"
-                         >
-                             <Trash2 size={16} />
-                         </button>
-                    </div>
+                    <div><p className={`font-bold ${loan.isPaid ? 'line-through text-text-muted' : ''}`}>{loan.person}</p><p className={`text-xs ${loan.type === 'lent' ? 'text-green-500' : 'text-red-500'}`}>{loan.isPaid ? t('loan_paid') : (loan.type === 'lent' ? 'Owes you' : 'You owe')}</p>{loan.dueDate && !loan.isPaid && (<p className="text-[10px] text-text-muted flex items-center gap-1 mt-0.5"><Clock size={10} />{new Date(loan.dueDate).toLocaleDateString()}</p>)}</div>
+                    <div className="flex items-center gap-2"><span className="font-mono font-bold mr-2">{formatCurrency(loan.amount)}</span><button onClick={() => toggleLoanStatus(loan.id)} className={`w-8 h-8 rounded-full flex items-center justify-center transition-all ${loan.isPaid ? 'bg-primary text-white' : 'bg-white/10 text-text-muted hover:text-white'}`}><Check size={16} /></button><button onClick={() => moveToTrash(loan, 'loan')} className="text-text-muted hover:text-mistake p-1"><Trash2 size={16} /></button></div>
                 </div>
             ))}
         </div>
@@ -718,203 +814,193 @@ const App: React.FC = () => {
   };
 
   const CalendarView = () => {
-      // "Traidzella" style calendar: Grid month view with activity indicators
-      const today = new Date();
-      const [currentMonth, setCurrentMonth] = useState(today.getMonth());
-      const [currentYear, setCurrentYear] = useState(today.getFullYear());
-      
-      // Weekly Stats State
+      const [currentDate, setCurrentDate] = useState(new Date(selectedDate));
       const [weekOffset, setWeekOffset] = useState(0);
 
-      const daysInMonth = new Date(currentYear, currentMonth + 1, 0).getDate();
-      const firstDay = new Date(currentYear, currentMonth, 1).getDay(); // 0 = Sunday
-
-      const monthName = new Date(currentYear, currentMonth).toLocaleString((lang === 'fr' || lang === 'dr') ? 'fr-FR' : 'en-US', { month: 'long', year: 'numeric' });
-
-      // Generate days array with padding for grid
+      // Derived state for month view
+      const year = currentDate.getFullYear();
+      const month = currentDate.getMonth();
+      const monthName = currentDate.toLocaleString((lang === 'fr' || lang === 'dr') ? 'fr-FR' : 'en-US', { month: 'long', year: 'numeric' });
+      
+      const firstDayOfMonth = new Date(year, month, 1).getDay(); // 0 Sun ... 6 Sat
+      const daysInMonth = new Date(year, month + 1, 0).getDate();
+      
       const days = [];
-      for (let i = 0; i < firstDay; i++) days.push(null);
+      for (let i = 0; i < firstDayOfMonth; i++) days.push(null);
       for (let i = 1; i <= daysInMonth; i++) days.push(i);
 
-      // --- Stats Calculation (Monthly) ---
-      // Fix: Strictly use the displayed month/year for the monthly report
-      let respectedDays = 0;
-      let missedDays = 0;
-      const joinDate = new Date(data.joinDate);
-      joinDate.setHours(0,0,0,0);
+      // --- Monthly Stats Calculation ---
+      const monthlyDays = Array.from({ length: daysInMonth }, (_, i) => {
+          const d = new Date(year, month, i + 1);
+          return getISODate(d);
+      });
 
-      for(let i=1; i<=daysInMonth; i++) {
-          const dateStr = `${currentYear}-${String(currentMonth + 1).padStart(2,'0')}-${String(i).padStart(2,'0')}`;
-          const currentDayDate = new Date(dateStr);
-          currentDayDate.setHours(0,0,0,0);
+      let daysRespected = 0;
+      let daysMissed = 0;
+      let totalTasksInMonth = 0;
+      let completedTasksInMonth = 0;
 
-          const isFuture = currentDayDate > new Date();
-          const isBeforeJoin = currentDayDate < joinDate;
-
-          // Only count stats for days that have passed/today AND are after the user joined
-          if(!isFuture && !isBeforeJoin) {
-             const hasTasks = data.tasks.some(t => t.date === dateStr);
-             const tasksCompleted = data.tasks.filter(t => t.date === dateStr && t.completed).length;
-             const hasMistakes = data.mistakes.some(m => isSameDay(m.date, dateStr));
-
-             if (tasksCompleted > 0 && !hasMistakes) respectedDays++;
-             else if ((!hasTasks || tasksCompleted === 0) || hasMistakes) missedDays++;
+      monthlyDays.forEach(dateStr => {
+          const dayTasks = data.tasks.filter(t => t.date === dateStr);
+          if (dayTasks.length > 0) {
+              totalTasksInMonth += dayTasks.length;
+              const completed = dayTasks.filter(t => t.completed).length;
+              completedTasksInMonth += completed;
+              
+              if (completed === dayTasks.length) daysRespected++;
+              else if (new Date(dateStr) < new Date(getISODate(new Date()))) daysMissed++; // Only count missed if in past
           }
-      }
-      
-      const totalDaysPassed = respectedDays + missedDays;
-      const completionRate = totalDaysPassed > 0 ? Math.round((respectedDays / totalDaysPassed) * 100) : 0;
+      });
 
-      // --- Stats Calculation (Weekly) ---
-      const getWeeklyStats = () => {
-          // Calculate start of week based on today/selected date PLUS offset
-          // Defaulting to today as anchor
-          const anchorDate = new Date();
-          const day = anchorDate.getDay();
-          // Monday start adjustment
-          const diff = anchorDate.getDate() - day + (day === 0 ? -6 : 1); 
-          
-          const weekStart = new Date(anchorDate);
-          weekStart.setDate(diff + (weekOffset * 7)); // Apply offset
-          weekStart.setHours(0,0,0,0);
-          
-          const weekEnd = new Date(weekStart);
-          weekEnd.setDate(weekStart.getDate() + 6); // Sunday
-          weekEnd.setHours(23,59,59,999);
+      const completionRate = totalTasksInMonth > 0 ? Math.round((completedTasksInMonth / totalTasksInMonth) * 100) : 0;
 
-          let tasksCompletedWeek = 0;
-          let tasksTotalWeek = 0;
-          let moneySpentWeek = 0;
-          let mistakesWeek = 0;
-
-          // Simple filtering logic
-          data.tasks.forEach(t => {
-              const d = new Date(t.date);
-              if (d >= weekStart && d <= weekEnd) {
-                  tasksTotalWeek++;
-                  if (t.completed) tasksCompletedWeek++;
-              }
-          });
-          
-          data.expenses.forEach(e => {
-              const d = new Date(e.date);
-              if (d >= weekStart && d <= weekEnd) {
-                  moneySpentWeek += e.amount;
-              }
-          });
-
-          data.mistakes.forEach(m => {
-              const d = new Date(m.date);
-              if (d >= weekStart && d <= weekEnd) {
-                  mistakesWeek++;
-              }
-          });
-
-          const weekCompletion = tasksTotalWeek > 0 ? Math.round((tasksCompletedWeek / tasksTotalWeek) * 100) : 0;
-          
-          return {
-              start: weekStart,
-              end: weekEnd,
-              tasksPct: weekCompletion,
-              spent: moneySpentWeek,
-              mistakes: mistakesWeek
-          };
+      // --- Weekly Stats Calculation ---
+      const getWeekRange = (date: Date, offset: number) => {
+          const target = new Date(date);
+          target.setDate(target.getDate() + (offset * 7));
+          const day = target.getDay(); // 0 is Sunday
+          // Adjust to get Monday as start (or based on locale, usually Monday for FR)
+          // Screenshot: 15-21 Dec (Mon-Sun)
+          const diff = target.getDate() - day + (day === 0 ? -6 : 1); 
+          const start = new Date(target);
+          start.setDate(diff);
+          const end = new Date(start);
+          end.setDate(start.getDate() + 6);
+          return { start, end };
       };
 
-      const weekly = getWeeklyStats();
+      const { start: weekStart, end: weekEnd } = getWeekRange(new Date(), weekOffset);
+      const weekStartStr = weekStart.toLocaleDateString((lang === 'fr' || lang === 'dr') ? 'fr-FR' : 'en-US', { day: 'numeric' });
+      const weekEndStr = weekEnd.toLocaleDateString((lang === 'fr' || lang === 'dr') ? 'fr-FR' : 'en-US', { day: 'numeric', month: 'short' });
+
+      // Aggregate weekly data
+      let weeklyTasksTotal = 0;
+      let weeklyTasksCompleted = 0;
+      let weeklyExpenses = 0;
+      let weeklyMistakes = 0;
+
+      const currentDayLoop = new Date(weekStart);
+      while (currentDayLoop <= weekEnd) {
+          const dateStr = getISODate(currentDayLoop);
+          
+          const tasks = data.tasks.filter(t => t.date === dateStr);
+          weeklyTasksTotal += tasks.length;
+          weeklyTasksCompleted += tasks.filter(t => t.completed).length;
+
+          const expenses = data.expenses.filter(e => isSameDay(e.date, dateStr));
+          weeklyExpenses += expenses.reduce((acc, curr) => acc + curr.amount, 0);
+
+          const mistakes = data.mistakes.filter(m => isSameDay(m.date, dateStr));
+          weeklyMistakes += mistakes.length;
+
+          currentDayLoop.setDate(currentDayLoop.getDate() + 1);
+      }
+
+      const weeklyProgress = weeklyTasksTotal > 0 ? Math.round((weeklyTasksCompleted / weeklyTasksTotal) * 100) : 0;
 
       return (
-          <div className="h-full flex flex-col pt-4 pb-24">
-               <SectionHeader title={t('calendar_title')} />
+          <div className="h-full flex flex-col pt-4 pb-24 px-4 overflow-y-auto no-scrollbar">
+               {/* Header */}
+               <h2 className="text-2xl font-display font-bold mb-6 text-white">{t('calendar_title')}</h2>
                
-               {/* Month Navigation for Calendar View & Monthly Report */}
-               <div className="flex items-center justify-between mb-6 px-4">
-                  <button onClick={() => setCurrentMonth(prev => prev - 1)}><ChevronLeft /></button>
-                  <h3 className="font-bold text-lg capitalize">{monthName}</h3>
-                  <button onClick={() => setCurrentMonth(prev => prev + 1)}><ChevronRight /></button>
+               {/* Month Navigation */}
+               <div className="flex justify-between items-center mb-6 px-4">
+                  <button onClick={() => setCurrentDate(new Date(year, month - 1, 1))} className="text-white hover:text-primary transition-colors"><ChevronLeft size={24}/></button>
+                  <h3 className="font-display font-bold text-xl capitalize text-white">{monthName}</h3>
+                  <button onClick={() => setCurrentDate(new Date(year, month + 1, 1))} className="text-white hover:text-primary transition-colors"><ChevronRight size={24}/></button>
                </div>
 
-               <div className="grid grid-cols-7 gap-2 px-2 text-center text-xs font-medium text-text-muted mb-2">
-                   {['S','M','T','W','T','F','S'].map((d, i) => <div key={i}>{d}</div>)}
-               </div>
-
-               <div className="grid grid-cols-7 gap-2 px-2 overflow-y-auto no-scrollbar max-h-[350px]">
-                   {days.map((day, i) => {
-                       if (!day) return <div key={i} className="aspect-square"></div>;
-                       
-                       const dateStr = `${currentYear}-${String(currentMonth + 1).padStart(2,'0')}-${String(day).padStart(2,'0')}`;
-                       const dayTasks = data.tasks.filter(t => t.date === dateStr && t.completed);
-                       const dayMistakes = data.mistakes.filter(m => isSameDay(m.date, dateStr));
-                       
-                       let bgClass = "bg-[#161616] border-white/5";
-                       if (dayTasks.length > 0 && dayMistakes.length === 0) bgClass = "bg-primary/20 border-primary/50 text-primary";
-                       else if (dayMistakes.length > 0) bgClass = "bg-mistake/20 border-mistake/50 text-mistake";
-                       else if (dateStr === selectedDate) bgClass = "bg-white/10 border-white/20";
-
-                       return (
-                           <div 
-                               key={i} 
-                               onClick={() => { setSelectedDate(dateStr); setView('dashboard'); setActiveTab('home'); }}
-                               className={`aspect-square rounded-xl border flex flex-col items-center justify-center cursor-pointer transition-all hover:scale-105 ${bgClass}`}
-                           >
-                               <span className="font-bold">{day}</span>
-                               <div className="flex gap-0.5 mt-1">
-                                   {dayTasks.length > 0 && <div className="w-1 h-1 bg-current rounded-full"></div>}
-                                   {dayMistakes.length > 0 && <div className="w-1 h-1 bg-mistake rounded-full"></div>}
+               {/* Calendar Grid */}
+               <div className="bg-[#050505] mb-8">
+                   {/* Days Header */}
+                   <div className="grid grid-cols-7 gap-1 text-center mb-4">
+                       {['S','M','T','W','T','F','S'].map((d, i) => (
+                           <span key={i} className="text-xs font-bold text-text-muted">{d}</span>
+                       ))}
+                   </div>
+                   
+                   {/* Days */}
+                   <div className="grid grid-cols-7 gap-2">
+                       {days.map((day, i) => {
+                           if (!day) return <div key={i} className="aspect-square"></div>;
+                           
+                           const dateStr = `${year}-${String(month + 1).padStart(2,'0')}-${String(day).padStart(2,'0')}`;
+                           const isSelected = dateStr === selectedDate;
+                           
+                           return (
+                               <div 
+                                   key={i} 
+                                   onClick={() => setSelectedDate(dateStr)}
+                                   className={`aspect-square flex items-center justify-center rounded-xl font-bold text-sm cursor-pointer transition-all
+                                       ${isSelected ? 'bg-white text-black shadow-lg scale-105' : 'bg-[#1C1C1E] text-white hover:bg-[#2C2C2E]'}
+                                   `}
+                               >
+                                   {day}
                                </div>
-                           </div>
-                       );
-                   })}
+                           );
+                       })}
+                   </div>
                </div>
-               
-               <div className="space-y-4 mt-6 px-2">
-                   {/* Monthly Stats Card - Driven by the Calendar Month Navigation */}
-                   <div className="p-5 bg-[#161616] border border-white/5 rounded-3xl">
-                       <div className="flex justify-between items-center mb-4">
-                           <h4 className="font-bold text-sm">{t('stats_month')}</h4>
-                           <span className="text-[10px] text-text-muted bg-white/5 px-2 py-1 rounded-full uppercase">{monthName}</span>
+
+               {/* Monthly Report Card */}
+               <div className="bg-[#161616] p-5 rounded-[32px] border border-white/5 mb-4">
+                   <div className="flex justify-between items-center mb-6">
+                       <h3 className="font-bold text-white">{t('stats_month')}</h3>
+                       <span className="text-[10px] bg-[#2C2C2E] px-3 py-1 rounded-full text-text-muted uppercase tracking-wider font-bold">
+                           {monthName}
+                       </span>
+                   </div>
+                   
+                   <div className="grid grid-cols-3 gap-2 text-center">
+                       <div className="flex flex-col items-center">
+                           <span className="text-2xl font-bold text-emerald-500 mb-1">{daysRespected}</span>
+                           <span className="text-[9px] text-text-muted uppercase font-bold tracking-wide">{t('stats_respected')}</span>
                        </div>
-                       <div className="grid grid-cols-3 gap-2 text-center">
-                           <div>
-                               <p className="text-2xl font-bold text-primary">{respectedDays}</p>
-                               <p className="text-[10px] text-text-muted uppercase tracking-wider">{t('stats_respected')}</p>
-                           </div>
-                           <div>
-                               <p className="text-2xl font-bold text-mistake">{missedDays}</p>
-                               <p className="text-[10px] text-text-muted uppercase tracking-wider">{t('stats_missed')}</p>
-                           </div>
-                            <div>
-                               <p className="text-2xl font-bold text-white">{completionRate}%</p>
-                               <p className="text-[10px] text-text-muted uppercase tracking-wider">{t('stats_completion')}</p>
-                           </div>
+                       <div className="flex flex-col items-center border-l border-white/5">
+                           <span className="text-2xl font-bold text-red-500 mb-1">{daysMissed}</span>
+                           <span className="text-[9px] text-text-muted uppercase font-bold tracking-wide">{t('stats_missed')}</span>
+                       </div>
+                       <div className="flex flex-col items-center border-l border-white/5">
+                           <span className="text-2xl font-bold text-white mb-1">{completionRate}%</span>
+                           <span className="text-[9px] text-text-muted uppercase font-bold tracking-wide">{t('stats_completion')}</span>
+                       </div>
+                   </div>
+               </div>
+
+               {/* Weekly Report Card */}
+               <div className="bg-[#161616] p-5 rounded-[32px] border border-white/5">
+                   <div className="flex justify-between items-center mb-6">
+                       <h3 className="font-bold text-white">{t('stats_weekly')}</h3>
+                       <div className="flex items-center gap-3 bg-[#2C2C2E] rounded-full px-1.5 py-1">
+                           <button onClick={() => setWeekOffset(o => o - 1)} className="w-5 h-5 flex items-center justify-center text-text-muted hover:text-white"><ChevronLeft size={14}/></button>
+                           <span className="text-[10px] text-text-muted font-bold min-w-[70px] text-center">
+                               {weekStartStr} - {weekEndStr}
+                           </span>
+                           <button onClick={() => setWeekOffset(o => o + 1)} className="w-5 h-5 flex items-center justify-center text-text-muted hover:text-white"><ChevronRight size={14}/></button>
                        </div>
                    </div>
 
-                   {/* Weekly Report Card - With specific week navigation */}
-                   <div className="p-5 bg-[#161616] border border-white/5 rounded-3xl">
-                        <div className="flex justify-between items-center mb-4">
-                           <h4 className="font-bold text-sm">{t('stats_weekly')}</h4>
-                           <div className="flex items-center gap-2 bg-white/5 rounded-full px-2 py-1">
-                                <button onClick={() => setWeekOffset(prev => prev - 1)} className="text-text-muted hover:text-white"><ChevronLeft size={14} /></button>
-                                <span className="text-[10px] text-text-muted min-w-[80px] text-center">{weekly.start.getDate()} - {weekly.end.getDate()} {weekly.end.toLocaleString('default', { month: 'short' })}</span>
-                                <button onClick={() => setWeekOffset(prev => prev + 1)} className="text-text-muted hover:text-white"><ChevronRight size={14} /></button>
+                   <div className="grid grid-cols-3 gap-2 text-center items-center">
+                       {/* Circular Progress for Tasks */}
+                       <div className="flex flex-col items-center">
+                           <div className="relative w-12 h-12 mb-2 flex items-center justify-center">
+                               <svg className="w-full h-full -rotate-90" viewBox="0 0 36 36">
+                                   <path d="M18 2.0845 a 15.9155 15.9155 0 0 1 0 31.831 a 15.9155 15.9155 0 0 1 0 -31.831" fill="none" stroke="#2C2C2E" strokeWidth="3" />
+                                   <path d="M18 2.0845 a 15.9155 15.9155 0 0 1 0 31.831 a 15.9155 15.9155 0 0 1 0 -31.831" fill="none" stroke="#10B981" strokeWidth="3" strokeDasharray={`${weeklyProgress}, 100`} />
+                               </svg>
+                               <span className="absolute text-[10px] font-bold text-emerald-500">{weeklyProgress}%</span>
                            </div>
+                           <span className="text-[9px] text-text-muted uppercase font-bold tracking-wide">Tasks</span>
                        </div>
-                        <div className="grid grid-cols-3 gap-2 text-center">
-                           <div className="flex flex-col items-center justify-center">
-                               <div className="w-10 h-10 rounded-full border-2 border-primary/30 flex items-center justify-center mb-1">
-                                   <span className="text-xs font-bold text-primary">{weekly.tasksPct}%</span>
-                               </div>
-                               <p className="text-[10px] text-text-muted uppercase tracking-wider">Tasks</p>
-                           </div>
-                           <div>
-                               <p className="text-xl font-bold text-white mt-1">{formatCurrency(weekly.spent)}</p>
-                               <p className="text-[10px] text-text-muted uppercase tracking-wider">{t('money_spent')}</p>
-                           </div>
-                            <div>
-                               <p className="text-xl font-bold text-mistake mt-1">{weekly.mistakes}</p>
-                               <p className="text-[10px] text-text-muted uppercase tracking-wider">{t('mistakes_logged')}</p>
-                           </div>
+
+                       <div className="flex flex-col items-center">
+                           <span className="text-xl font-bold text-white mb-1">{formatCurrency(weeklyExpenses)}</span>
+                           <span className="text-[9px] text-text-muted uppercase font-bold tracking-wide">{t('money_spent')}</span>
+                       </div>
+
+                       <div className="flex flex-col items-center">
+                           <span className="text-xl font-bold text-red-500 mb-1">{weeklyMistakes}</span>
+                           <span className="text-[9px] text-text-muted uppercase font-bold tracking-wide">{t('mistakes_logged')}</span>
                        </div>
                    </div>
                </div>
@@ -923,7 +1009,7 @@ const App: React.FC = () => {
   };
 
   const WalletView = () => {
-      // Integrated Wallet + Transaction Adding Logic
+    // ... WalletView remains unchanged ...
       const totalIncome = (data.incomes || []).reduce((acc, curr) => acc + curr.amount, 0);
       const totalExpense = data.expenses.reduce((acc, curr) => acc + curr.amount, 0);
       const balance = totalIncome - totalExpense;
@@ -931,23 +1017,22 @@ const App: React.FC = () => {
       const [newAmount, setNewAmount] = useState("");
       const [newDesc, setNewDesc] = useState("");
       const [txType, setTxType] = useState<'income' | 'expense' | 'lent' | 'borrowed'>('expense');
-      const [dueDate, setDueDate] = useState(""); // State for Loan Due Date
+      const [dueDate, setDueDate] = useState(""); 
       const [showAdd, setShowAdd] = useState(false);
-      
-      // Filter State
+      const [isAnalyzing, setIsAnalyzing] = useState(false);
       const [filter, setFilter] = useState<'all' | 'income' | 'expense' | 'loans'>('all');
       const [showFilterMenu, setShowFilterMenu] = useState(false);
+      
+      const fileInputRef = useRef<HTMLInputElement>(null);
 
       const handleAddTx = () => {
           if (!newAmount) return;
           const amt = parseFloat(newAmount);
           const date = new Date(selectedDate);
-          // Set time to now
           const now = new Date();
           date.setHours(now.getHours(), now.getMinutes());
           const dateStr = date.toISOString();
 
-          // Create copies to ensure React detects change
           const newIncomes = [...(data.incomes || [])];
           const newExpenses = [...data.expenses];
           const newLoans = [...data.loans];
@@ -965,35 +1050,86 @@ const App: React.FC = () => {
           }
 
           updateData({ incomes: newIncomes, expenses: newExpenses, loans: newLoans });
-
           setNewAmount("");
           setNewDesc("");
           setDueDate("");
           setShowAdd(false);
+          
+          addInAppNotification("Transaction Added", `Added ${formatCurrency(amt)} to ${txType}`, 'success');
+      };
+
+      const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+          const file = e.target.files?.[0];
+          if (!file) return;
+
+          if (!process.env.API_KEY) {
+              alert("API Key missing");
+              return;
+          }
+
+          setIsAnalyzing(true);
+          try {
+              const reader = new FileReader();
+              reader.readAsDataURL(file);
+              reader.onloadend = async () => {
+                  const base64Data = reader.result as string;
+                  const base64Content = base64Data.split(',')[1];
+
+                  const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+                  const prompt = `Analyze this image (receipt or statement). Extract transactions. Return ONLY a JSON array with objects: { "amount": number, "description": "string", "type": "income" or "expense" }. Ignore dates, assume today.`;
+                  
+                  const result = await ai.models.generateContent({
+                    model: 'gemini-3-flash-preview',
+                    contents: {
+                      parts: [
+                        { text: prompt },
+                        { 
+                          inlineData: { 
+                            data: base64Content, 
+                            mimeType: file.type 
+                          } 
+                        }
+                      ]
+                    }
+                  });
+                  
+                  const text = result.text || "";
+                  const jsonStr = text.replace(/```json|```/g, '').trim();
+                  const parsed = JSON.parse(jsonStr);
+
+                  if (Array.isArray(parsed)) {
+                      const newIncomes = [...data.incomes];
+                      const newExpenses = [...data.expenses];
+                      const nowStr = new Date().toISOString();
+
+                      parsed.forEach((tx: any) => {
+                          if (tx.type === 'income') {
+                              newIncomes.push({ id: Date.now().toString() + Math.random(), amount: tx.amount, description: tx.description, date: nowStr });
+                          } else {
+                              newExpenses.push({ id: Date.now().toString() + Math.random(), amount: tx.amount, description: tx.description, date: nowStr });
+                          }
+                      });
+                      updateData({ incomes: newIncomes, expenses: newExpenses });
+                      addInAppNotification("Scan Complete", `Added ${parsed.length} transaction(s)`, 'success');
+                  }
+              };
+          } catch (err) {
+              console.error(err);
+              alert(t('scan_error'));
+          } finally {
+              setIsAnalyzing(false);
+          }
       };
 
       const transactions = useMemo(() => {
-          let incomes = (data.incomes || []).map(i => ({ ...i, type: 'income', isPaid: false })); // isPaid false dummy for type compatibility
+          let incomes = (data.incomes || []).map(i => ({ ...i, type: 'income', isPaid: false })); 
           let expenses = data.expenses.map(e => ({ ...e, type: 'expense', isPaid: false }));
           
-          // Identify loans in the income/expense stream for proper "Check" button functionality or filtering?
-          // Actually, loans are stored in separate `loans` array but also added as expense/income for balance tracking.
-          // To enable proper filtering of "Loans" in history, we should look at the loan array or inferred types.
-          // However, the current logic adds loans as plain expenses/incomes too. 
-          // For the "Historique", we will stick to the incomes/expenses array but maybe we can merge actual loan objects for better interaction?
-          // To keep it simple and consistent with existing structure: 
-          // We will render the *Loan Objects* in the history list if filter is "Loans", otherwise normal income/expense.
-          // Or better: We merge everything and sort.
-          
-          // Let's create a unified list that includes actual Loan objects for interaction
-          const loansAsTransactions = data.loans.map(l => ({
+           const loansAsTransactions = data.loans.map(l => ({
               id: l.id,
               amount: l.amount,
-              description: l.person, // Use person name as description
-              date: new Date().toISOString(), // Loans might not have date field in original type, check definition. They don't have date. We can't sort them properly without date.
-              // Wait, the prompt implies managing loans in "Kridi". The "Historique" usually shows money flow.
-              // Let's keep Historique for money flow.
-              // But add a specific filter view.
+              description: l.person, 
+              date: new Date().toISOString(), 
               type: l.type,
               isPaid: l.isPaid,
               isLoanObject: true 
@@ -1001,18 +1137,14 @@ const App: React.FC = () => {
 
           let all = [...incomes, ...expenses];
           
-          // Apply Filter
           if (filter === 'income') return all.filter(t => t.type === 'income').sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
           if (filter === 'expense') return all.filter(t => t.type === 'expense').sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
           
           if (filter === 'loans') {
-             // Return actual loan objects
-             // We need to fetch loans. But loans don't have a creation date property in the Interface defined earlier.
-             // We will assume they are sorted by array order (newest last usually, so reverse)
              return [...data.loans].reverse().map(l => ({
                  ...l,
                  description: l.person,
-                 date: new Date().toISOString(), // Placeholder
+                 date: new Date().toISOString(), 
                  isLoanObject: true
              }));
           }
@@ -1022,34 +1154,43 @@ const App: React.FC = () => {
 
       return (
           <div className="h-full flex flex-col pt-4 pb-24">
-               <div className="flex items-center justify-between mb-6">
-                    <h2 className="text-xl font-display font-bold text-white">{t('section_wallet')}</h2>
-                    <Button variant="ghost" className="!p-2" onClick={() => setShowAdd(!showAdd)}>
-                        {showAdd ? <X size={20} /> : <Plus size={20} />}
-                    </Button>
-               </div>
+               <SectionHeader 
+                  title={t('section_wallet')} 
+                  rightElement={
+                    <button onClick={() => setShowAdd(!showAdd)} className="w-10 h-10 rounded-full border border-white/10 flex items-center justify-center text-white hover:bg-white/10">
+                        {showAdd ? <X size={20}/> : <Plus size={20}/>}
+                    </button>
+                  }
+               />
 
-               <div className="bg-gradient-to-br from-emerald-900 to-emerald-950 p-6 rounded-[32px] border border-white/10 relative overflow-hidden mb-6">
-                    <div className="absolute top-0 right-0 w-32 h-32 bg-white/5 blur-[40px] rounded-full -mr-10 -mt-10"></div>
-                    <p className="text-emerald-200 text-sm mb-1">{t('money_balance')}</p>
-                    <h1 className="text-4xl font-display font-bold text-white mb-6">{formatCurrency(balance)}</h1>
+               {/* Clean Balance Card */}
+               <div className="bg-[#161616] p-6 rounded-3xl border border-white/5 mb-6 text-center">
+                    <p className="text-text-muted text-sm mb-2 uppercase tracking-widest">{t('money_balance')}</p>
+                    <h1 className="text-5xl font-display font-bold text-white mb-6">{formatCurrency(balance)}</h1>
                     
-                    <div className="grid grid-cols-2 gap-4">
-                        <div className="bg-black/20 rounded-2xl p-3 backdrop-blur-sm">
-                            <div className="flex items-center gap-2 mb-1 text-emerald-300">
-                                <ArrowDownLeft size={16} />
-                                <span className="text-xs font-bold">{t('money_income')}</span>
-                            </div>
-                            <p className="text-lg font-mono text-white">{formatCurrency(totalIncome)}</p>
+                    <div className="grid grid-cols-2 gap-4 border-t border-white/5 pt-6">
+                        <div>
+                             <p className="text-xs text-text-muted mb-1 flex items-center justify-center gap-1"><ArrowDownLeft size={12} className="text-emerald-500"/> {t('money_income')}</p>
+                             <p className="text-lg font-mono font-bold text-white">{formatCurrency(totalIncome)}</p>
                         </div>
-                        <div className="bg-black/20 rounded-2xl p-3 backdrop-blur-sm">
-                             <div className="flex items-center gap-2 mb-1 text-red-300">
-                                <ArrowUpRight size={16} />
-                                <span className="text-xs font-bold">{t('money_spent')}</span>
-                            </div>
-                            <p className="text-lg font-mono text-white">{formatCurrency(totalExpense)}</p>
+                        <div>
+                             <p className="text-xs text-text-muted mb-1 flex items-center justify-center gap-1"><ArrowUpRight size={12} className="text-red-500"/> {t('money_spent')}</p>
+                             <p className="text-lg font-mono font-bold text-white">{formatCurrency(totalExpense)}</p>
                         </div>
                     </div>
+               </div>
+
+               {/* AI Scan Mini Button */}
+               <div className="flex justify-center mb-6">
+                   <input type="file" ref={fileInputRef} className="hidden" accept="image/*" onChange={handleFileUpload} />
+                   <button 
+                       onClick={() => fileInputRef.current?.click()}
+                       disabled={isAnalyzing}
+                       className="flex items-center gap-2 text-xs text-text-muted bg-[#1A1A1A] px-4 py-2 rounded-full hover:text-white transition-colors"
+                   >
+                       {isAnalyzing ? <div className="animate-spin w-3 h-3 border border-white border-t-transparent rounded-full"></div> : <Scan size={14} />}
+                       {isAnalyzing ? t('analyzing') : t('scan_btn')}
+                   </button>
                </div>
 
                {showAdd && (
@@ -1060,14 +1201,14 @@ const App: React.FC = () => {
                             <div className="grid grid-cols-2 gap-3">
                                 <button 
                                     onClick={() => setTxType('income')}
-                                    className={`p-4 rounded-2xl text-sm font-bold border transition-all flex flex-col items-center justify-center gap-1 ${txType === 'income' ? 'bg-emerald-500/20 border-emerald-500 text-emerald-500' : 'bg-input border-transparent text-text-muted'}`}
+                                    className={`p-4 rounded-2xl text-sm font-bold border transition-all flex flex-col items-center justify-center gap-1 ${txType === 'income' ? 'bg-emerald-500/10 border-emerald-500 text-emerald-500' : 'bg-[#262626] border-transparent text-text-muted'}`}
                                 >
                                     <ArrowDownLeft size={20} />
                                     {t('tx_type_income')}
                                 </button>
                                 <button 
                                     onClick={() => setTxType('expense')}
-                                    className={`p-4 rounded-2xl text-sm font-bold border transition-all flex flex-col items-center justify-center gap-1 ${txType === 'expense' ? 'bg-red-500/20 border-red-500 text-red-500' : 'bg-input border-transparent text-text-muted'}`}
+                                    className={`p-4 rounded-2xl text-sm font-bold border transition-all flex flex-col items-center justify-center gap-1 ${txType === 'expense' ? 'bg-red-500/10 border-red-500 text-red-500' : 'bg-[#262626] border-transparent text-text-muted'}`}
                                 >
                                     <ArrowUpRight size={20} />
                                     {t('tx_type_expense')}
@@ -1076,13 +1217,13 @@ const App: React.FC = () => {
                             <div className="grid grid-cols-2 gap-3">
                                 <button 
                                     onClick={() => setTxType('lent')}
-                                    className={`p-3 rounded-xl text-xs font-semibold border transition-all ${txType === 'lent' ? 'bg-orange-500/20 border-orange-500 text-orange-500' : 'bg-input border-transparent text-text-muted'}`}
+                                    className={`p-3 rounded-xl text-xs font-semibold border transition-all ${txType === 'lent' ? 'bg-orange-500/10 border-orange-500 text-orange-500' : 'bg-[#262626] border-transparent text-text-muted'}`}
                                 >
                                     {t('tx_type_lent')}
                                 </button>
                                 <button 
                                     onClick={() => setTxType('borrowed')}
-                                    className={`p-3 rounded-xl text-xs font-semibold border transition-all ${txType === 'borrowed' ? 'bg-blue-500/20 border-blue-500 text-blue-500' : 'bg-input border-transparent text-text-muted'}`}
+                                    className={`p-3 rounded-xl text-xs font-semibold border transition-all ${txType === 'borrowed' ? 'bg-blue-500/10 border-blue-500 text-blue-500' : 'bg-[#262626] border-transparent text-text-muted'}`}
                                 >
                                     {t('tx_type_borrowed')}
                                 </button>
@@ -1137,22 +1278,22 @@ const App: React.FC = () => {
                    </div>
                )}
 
-               <div className="flex-1 overflow-y-auto space-y-3 no-scrollbar">
+               <div className="flex-1 overflow-y-auto space-y-3 no-scrollbar pb-6">
                    {transactions.length === 0 && (
-                       <p className="text-text-muted text-center text-sm py-10">{t('tx_empty')}</p>
+                       <p className="text-text-muted text-center text-sm py-10 opacity-50">{t('tx_empty')}</p>
                    )}
                    {transactions.map((t: any) => {
                        const isLoan = t.isLoanObject || t.type === 'lent' || t.type === 'borrowed';
                        const isPaid = t.isPaid;
 
                        return (
-                       <div key={t.id} className={`flex justify-between items-center p-4 rounded-3xl bg-[#161616] border ${isPaid ? 'border-transparent opacity-50' : 'border-white/5'}`}>
+                       <div key={t.id} className={`flex justify-between items-center p-4 rounded-3xl bg-[#161616] border border-white/5`}>
                            <div className="flex items-center gap-3">
                                <div className={`w-10 h-10 rounded-full flex items-center justify-center ${t.type === 'income' ? 'bg-emerald-500/10 text-emerald-500' : (isLoan ? 'bg-purple-500/10 text-purple-500' : 'bg-red-500/10 text-red-500')}`}>
                                    {t.type === 'income' ? <ArrowDownLeft size={20} /> : (isLoan ? <MoreHorizontal size={20}/> : <ArrowUpRight size={20} />)}
                                </div>
                                <div>
-                                   <p className={`font-bold text-sm ${isPaid ? 'line-through' : ''}`}>{t.description}</p>
+                                   <p className={`font-bold text-sm ${isPaid ? 'line-through text-text-muted' : 'text-white'}`}>{t.description}</p>
                                    {!t.isLoanObject && <p className="text-xs text-text-muted">{new Date(t.date).toLocaleDateString()}</p>}
                                    {t.isLoanObject && <p className="text-xs text-text-muted">{t.type === 'lent' ? 'Lent' : 'Borrowed'}</p>}
                                </div>
@@ -1162,7 +1303,6 @@ const App: React.FC = () => {
                                    {t.type === 'income' ? '+' : '-'}{formatCurrency(t.amount)}
                                </span>
                                
-                               {/* Check button for loans in filter view */}
                                {filter === 'loans' && (
                                    <button 
                                         onClick={() => toggleLoanStatus(t.id)}
@@ -1183,7 +1323,7 @@ const App: React.FC = () => {
       )
   };
 
-  // Generic List Views (Time Manager, etc.) wrapped in standard layout
+  // GenericListView and Main Render Logic remain the same...
   const GenericListView = ({ title, onAdd, items, renderItem, placeholder }: any) => {
     const [newItem, setNewItem] = useState("");
     return (
@@ -1200,17 +1340,17 @@ const App: React.FC = () => {
                 />
                 <button 
                    onClick={() => onAdd(newItem, setNewItem)} 
-                   className="w-[54px] h-[54px] rounded-2xl bg-primary flex items-center justify-center text-white shadow-glow active:scale-95 transition-transform"
+                   className="w-[54px] h-[54px] rounded-2xl bg-primary flex items-center justify-center text-white active:scale-95 transition-transform"
                 >
                     <Plus size={24} />
                 </button>
             </div>
-
+            
             <div className="flex-1 overflow-y-auto space-y-3 no-scrollbar">
                 {items.length === 0 ? (
                     <div className="text-center text-text-muted mt-20 opacity-30">
                         <Trophy size={48} className="mx-auto mb-4" />
-                        <p className="text-sm">{t('tasks_empty')}</p>
+                        <p className="text-sm">Nothing here yet.</p>
                     </div>
                 ) : (
                     items.map(renderItem)
@@ -1219,6 +1359,97 @@ const App: React.FC = () => {
         </div>
     )
   }
+
+  // Define TasksView as a component to prevent hooks crash
+  const TasksView = () => {
+        const [newItem, setNewItem] = useState("");
+        const [newTime, setNewTime] = useState(""); 
+        const [showTimeInput, setShowTimeInput] = useState(false);
+
+        const handleAddTask = () => {
+            if(!newItem.trim()) return;
+            
+            if(newTime) {
+                scheduleNotification(newItem, newTime);
+            }
+
+            updateData({ 
+                tasks: [...data.tasks, { id: Date.now().toString(), text: newItem, completed: false, isPriority: false, date: selectedDate, time: newTime }] 
+            });
+            
+            setNewItem("");
+            setNewTime("");
+            setShowTimeInput(false);
+        };
+
+        const items = data.tasks.filter(t => t.date === selectedDate);
+        
+        return (
+            <div className="h-full flex flex-col pt-4 pb-24">
+                <SectionHeader title={t('tasks_title')} onBack={() => setView('dashboard')} />
+                <div className="mb-6 space-y-3">
+                    <div className="flex gap-2">
+                        <div className="flex-1 bg-[#262626] rounded-2xl flex items-center pr-2">
+                            <input 
+                                value={newItem} 
+                                onChange={(e) => setNewItem(e.target.value)} 
+                                placeholder={t('tasks_placeholder')} 
+                                className="bg-transparent w-full p-4 text-white focus:outline-none placeholder-text-dark text-sm"
+                                onKeyDown={(e) => e.key === 'Enter' && handleAddTask()}
+                            />
+                            <button 
+                                onClick={() => setShowTimeInput(!showTimeInput)} 
+                                className={`p-2 rounded-full transition-colors ${showTimeInput || newTime ? 'bg-primary/20 text-primary' : 'text-text-muted hover:text-white'}`}
+                            >
+                                <Clock size={20} />
+                            </button>
+                        </div>
+                        <button 
+                            onClick={handleAddTask} 
+                            className="w-[54px] h-[54px] rounded-2xl bg-primary flex items-center justify-center text-white active:scale-95 transition-transform"
+                        >
+                            <Plus size={24} />
+                        </button>
+                    </div>
+                    
+                    {showTimeInput && (
+                        <div className="animate-in slide-in-from-top-2">
+                            <input 
+                                type="time"
+                                value={newTime}
+                                onChange={(e) => setNewTime(e.target.value)}
+                                className="w-full bg-[#161616] border border-white/10 rounded-xl p-3 text-white text-sm"
+                            />
+                        </div>
+                    )}
+                </div>
+
+                <div className="flex-1 overflow-y-auto space-y-3 no-scrollbar">
+                    {items.length === 0 ? (
+                        <div className="text-center text-text-muted mt-20 opacity-30">
+                            <Trophy size={48} className="mx-auto mb-4" />
+                            <p className="text-sm">{t('tasks_empty')}</p>
+                        </div>
+                    ) : (
+                        items.map(task => (
+                            <div key={task.id} className={`flex items-center justify-between p-4 rounded-3xl border transition-all duration-300 ${task.completed ? 'bg-[#161616]/50 border-transparent opacity-50' : 'bg-[#161616] border-white/5'}`}>
+                                <div className="flex items-center gap-3 flex-1 cursor-pointer" onClick={() => updateData({ tasks: data.tasks.map(t => t.id === task.id ? { ...t, completed: !t.completed } : t) })}>
+                                    <div className={`w-6 h-6 rounded-full border-2 flex items-center justify-center transition-all ${task.completed ? 'bg-primary border-primary' : 'border-text-muted'}`}>
+                                        {task.completed && <CheckCircle2 size={14} className="text-white" />}
+                                    </div>
+                                    <div className="flex flex-col">
+                                        <span className={task.completed ? 'line-through text-text-muted' : 'text-white'}>{privateMode ? "----" : task.text}</span>
+                                        {task.time && <span className="text-[10px] text-primary flex items-center gap-1"><Clock size={10}/> {task.time}</span>}
+                                    </div>
+                                </div>
+                                <button onClick={() => moveToTrash(task, 'task')} className="text-text-muted hover:text-mistake p-2"><Trash2 size={16} /></button>
+                            </div>
+                        ))
+                    )}
+                </div>
+            </div>
+        );
+  };
 
   // --- Main Render Logic ---
 
@@ -1230,31 +1461,9 @@ const App: React.FC = () => {
         
         {view === 'dashboard' && <DashboardView />}
         
-        {view === 'time_manager' && (
-            <GenericListView 
-                title={t('tasks_title')}
-                placeholder={t('tasks_placeholder')}
-                items={data.tasks.filter(t => t.date === selectedDate)}
-                onAdd={(text: string, reset: any) => {
-                    if(!text.trim()) return;
-                    updateData({ 
-                        tasks: [...data.tasks, { id: Date.now().toString(), text, completed: false, isPriority: false, date: selectedDate }] 
-                    });
-                    reset("");
-                }}
-                renderItem={(task: any) => (
-                    <div key={task.id} className={`flex items-center justify-between p-4 rounded-3xl border transition-all duration-300 ${task.completed ? 'bg-[#161616]/50 border-transparent opacity-50' : 'bg-[#161616] border-white/5'}`}>
-                        <div className="flex items-center gap-3 flex-1 cursor-pointer" onClick={() => updateData({ tasks: data.tasks.map(t => t.id === task.id ? { ...t, completed: !t.completed } : t) })}>
-                            <div className={`w-6 h-6 rounded-full border-2 flex items-center justify-center transition-all ${task.completed ? 'bg-primary border-primary' : 'border-text-muted'}`}>
-                                {task.completed && <CheckCircle2 size={14} className="text-white" />}
-                            </div>
-                            <span className={task.completed ? 'line-through text-text-muted' : ''}>{privateMode ? "----" : task.text}</span>
-                        </div>
-                        <button onClick={() => moveToTrash(task, 'task')} className="text-text-muted hover:text-mistake p-2"><Trash2 size={16} /></button>
-                    </div>
-                )}
-            />
-        )}
+        {view === 'notifications' && <NotificationsView />}
+        
+        {view === 'time_manager' && <TasksView />}
 
         {view === 'personal_challenges' && (
              <GenericListView 
@@ -1315,26 +1524,7 @@ const App: React.FC = () => {
         )}
         
         {view === 'loans' && <LoansView />}
-        {view === 'daily_summary' && (
-            <div className="h-full flex flex-col items-center justify-center text-center pb-20">
-                <div className="w-24 h-24 bg-primary/20 rounded-full flex items-center justify-center mb-8 animate-pulse text-primary">
-                    <CheckCircle2 size={48} />
-                </div>
-                <h2 className="text-3xl font-display font-bold mb-2">{t('summary_title')}</h2>
-                <p className="text-text-muted mb-10">{t('summary_footer')}</p>
-                <div className="grid grid-cols-2 gap-4 w-full mb-10">
-                     <div className="bg-[#161616] p-5 rounded-3xl border border-white/5">
-                        <p className="text-2xl font-bold">{data.tasks.filter(t => t.date === selectedDate && t.completed).length}</p>
-                        <p className="text-xs text-text-muted">{t('section_tasks')}</p>
-                     </div>
-                     <div className="bg-[#161616] p-5 rounded-3xl border border-white/5">
-                        <p className="text-2xl font-bold">{formatCurrency(data.expenses.filter(e => isSameDay(e.date, selectedDate)).reduce((a,c) => a+c.amount,0))}</p>
-                        <p className="text-xs text-text-muted">{t('money_spent')}</p>
-                     </div>
-                </div>
-                <Button fullWidth onClick={() => setView('dashboard')}>Back Home</Button>
-            </div>
-        )}
+        {view === 'daily_summary' && <ReportView />}
 
         {view === 'calendar' && <CalendarView />}
         {view === 'wallet' && <WalletView />}
