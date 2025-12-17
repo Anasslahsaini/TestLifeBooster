@@ -1,3 +1,4 @@
+
 import { Translations, AppData } from './types';
 
 export const TEXT: Translations = {
@@ -163,6 +164,14 @@ export const TEXT: Translations = {
   stats_missed: { en: "Days Missed", fr: "Jours Manqués", dr: "Jours Manqués" },
   stats_completion: { en: "Completion", fr: "Complétion", dr: "Complétion" },
   
+  // Notifications
+  notifications_title: { en: "Notifications", fr: "Notifications", dr: "I3lamat" },
+  notifications_mark_read: { en: "Mark all as read", fr: "Tout marquer comme lu", dr: "9ra kulchi" },
+  notifications_empty: { en: "No notifications yet", fr: "Aucune notification", dr: "Walou" },
+  scan_btn: { en: "Scan Receipt", fr: "Scanner Reçu", dr: "Scanner L'wer9a" },
+  analyzing: { en: "Analyzing...", fr: "Analyse...", dr: "Kay9ra..." },
+  scan_error: { en: "Scan failed. Try again.", fr: "Échec du scan. Réessayez.", dr: "Ma9rach l'image. 3awd." },
+
   // General
   back: { en: "Back", fr: "Retour", dr: "Rjou3" },
   next: { en: "Next", fr: "Suivant", dr: "Zid" },
@@ -181,6 +190,7 @@ export const INITIAL_DATA: AppData = {
   loans: [],
   mistakes: [],
   trash: [], // Initialize trash
+  notifications: [], // Initialize notifications
   dailyGoodThing: "",
   lastActiveDate: new Date().toISOString(),
 };
